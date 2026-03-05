@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>企业微信智能表格聚合空闲检测</title>
+<style>
+:root{--bg:#0f172a;--panel:#111827;--text:#e5e7eb;--accent:#22c55e;--muted:#9ca3af}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial}
+.wrap{max-width:1100px;margin:0 auto;padding:24px}
+.panel{background:var(--panel);border:1px solid rgba(255,255,255,.06);border-radius:12px;padding:16px;margin-bottom:12px}
+.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+button{padding:8px 12px;background:transparent;border:1px solid rgba(255,255,255,.12);border-radius:8px;color:var(--text);cursor:pointer}
+button.primary{border-color:var(--accent)}
+select,input,textarea{padding:8px 10px;background:transparent;border:1px solid rgba(255,255,255,.12);border-radius:8px;color:var(--text)}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{border:1px solid rgba(255,255,255,.1);padding:6px 8px;vertical-align:top}
+.muted{color:var(--muted)}
+.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}
+@media (max-width:900px){.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="panel">
+    <div class="row">
+      <b>企业微信“任务计划跟踪表”聚合空闲检测</b>
+      <button id="paste" class="primary">从剪贴板追加一张表</button>
+      <button id="addArea">手动粘贴追加</button>
+      <button id="clear">清空</button>
+      <button id="analyze" class="primary">统计空闲人员</button>
+      <button id="export">导出空闲CSV</button>
+      <span class="muted">在智能表格中按 Ctrl+A → Ctrl+C，然后返回这里点“从剪贴板追加”。</span>
+    </div>
+  </div>
+  <div class="panel grid">
+    <div>
+      <div class="row"><b>列映射</b> <span class="muted">自动识别失败时手动选择</span></div>
+      <div class="row">
+        <label>姓名列 <select id="colName"></select></label>
+        <label>部门列 <select id="colDept"></select></label>
+        <label>开始时间列 <select id="colStart"></select></label>
+        <label>结束时间列 <select id="colEnd"></select></label>
+        <label>状态列 <select id="colStatus"></select></label>
+      </div>
+      <div class="muted">状态列可选；若包含“已完成”等字样将视为完成。</div>
+    </div>
+    <div>
+      <div><b>已导入表</b></div>
+      <ul id="tables" style="margin:8px 0 0 14px;"></ul>
+    </div>
+  </div>
+  <div class="panel">
+    <div><b>空闲人员</b> <span class="muted">规则：当前无任务 / 全部完成 / 逾期且无新任务</span></div>
+    <table id="idleTable"><thead><tr><th>研发人员</th></tr></thead><tbody></tbody></table>
+  </div>
+  <div class="panel" id="pastePanel" style="display:none">
+    <div class="row"><b>手动粘贴内容</b> <span class="muted">直接粘贴从智能表格复制的整表或区域</span></div>
+    <textarea id="pasteArea" rows="10"></textarea>
+    <div class="row"><button id="appendArea" class="primary">追加到数据集</button></div>
+  </div>
+</div>
+<script>
+const $=s=>document.querySelector(s)
+const pasteBtn=$('#paste')
+const addAreaBtn=$('#addArea')
+const clearBtn=$('#clear')
+const analyzeBtn=$('#analyze')
+const exportBtn=$('#export')
+const tablesUl=$('#tables')
+const pastePanel=$('#pastePanel')
+const pasteArea=$('#pasteArea')
+const appendAreaBtn=$('#appendArea')
+const idleTBody=$('#idleTable tbody')
+const colName=$('#colName')
+const colDept=$('#colDept')
+const colStart=$('#colStart')
+const colEnd=$('#colEnd')
+const colStatus=$('#colStatus')
+let dataset=[]
+let headers=[]
+function guessCols(hs){
+  function find(re,alt){return hs.find(x=>re.test(x))||alt}
+  return{
+    name:find(/^(研发人员|负责人|姓名|人员|执行人|Owner|Assignee|Responsible|Engineer|Developer)$/i,''),
+    dept:find(/^(部门|科室|团队)$/i,''),
+    start:find(/^(开始日期(\(Start Date\))?|开始|开始时间|起始|Start( Date)?)$/i,''),
+    end:find(/^(结束日期(\(End Date\))?|结束|结束时间|截止|End( Date)?|Due( Date)?)$/i,''),
+    status:find(/^(状态(\(Status\))?|进度|完成情况|Status)$/i,'')
+  }
+}
+function setColOptions(hs){
+  function fill(sel,def){
+    sel.innerHTML=''
+    hs.forEach(h=>{const o=document.createElement('option');o.value=h;o.textContent=h;sel.appendChild(o)})
+    if(def&&hs.includes(def)) sel.value=def
+  }
+  const g=guessCols(hs)
+  fill(colName,g.name||'');fill(colStart,g.start||'');fill(colEnd,g.end||'');fill(colStatus,g.status||'')
+  if(!colName.value){
+    const prefer = ['研发人员','负责人','姓名','人员','执行人','Owner']
+    const hit = prefer.find(p=>hs.includes(p))
+    colName.value = hit || hs[0] || ''
+  }
+  if(g.dept){
+    fill(colDept,g.dept)
+    if(colDept.parentElement) colDept.parentElement.style.display=''
+  }else{
+    // 没有部门列则隐藏该下拉
+    if(colDept.parentElement) colDept.parentElement.style.display='none'
+  }
+}
+function detectHeader(lines){
+  const maxCheck = Math.min(5, lines.length)
+  for(let i=0;i<maxCheck;i++){
+    const cols = lines[i].split(/\t/).map(s=>s.trim())
+    const hit = cols.some(c=>/^(研发人员|负责人|姓名|人员|执行人|Owner|Assignee|Responsible|开始日期(\(Start Date\))?|结束日期(\(End Date\))?|Start( Date)?|End( Date)?|Due( Date)?|状态(\(Status\))?|Status)$/i.test(c))
+    if(hit) return { header: cols, headerIndex: i }
+  }
+  return { header: lines[0].split(/\t/).map(s=>s.trim()), headerIndex: 0 }
+}
+function parseTableText(t){
+  const lines=t.trim().split(/\r?\n/).filter(x=>x.trim()!=='')
+  if(lines.length===0) return []
+  const { header, headerIndex } = detectHeader(lines)
+  const dataLines = lines.slice(headerIndex+1)
+  // 将“行内换行”的单元格合并：以“tab 数达到表头列数-1”为一行的判定
+  const needTabs = Math.max(0, header.length - 1)
+  const rows = []
+  let buffer = ''
+  function flushIfComplete() {
+    if (buffer === '') return false
+    const tabCount = (buffer.match(/\t/g) || []).length
+    if (tabCount >= needTabs) {
+      let cols = buffer.split('\t')
+      if (cols.length < header.length) {
+        cols = cols.concat(Array(header.length - cols.length).fill(''))
+      } else if (cols.length > header.length) {
+        const head = cols.slice(0, header.length - 1)
+        const tail = cols.slice(header.length - 1).join(' ')
+        cols = head.concat([tail])
+      }
+      rows.push(cols.map(s => String(s).replace(/\r?\n/g, ' ').trim()))
+      buffer = ''
+      return true
+    }
+    return false
+  }
+  for (const line of dataLines) {
+    const clean = String(line)
+    buffer = buffer ? buffer + '\n' + clean : clean
+    flushIfComplete()
+  }
+  // 如果最后仍有残留，尽力解析为一行
+  if (buffer) {
+    let cols = buffer.split('\t')
+    if (cols.length < header.length) cols = cols.concat(Array(header.length - cols.length).fill(''))
+    if (cols.length > header.length) {
+      const head = cols.slice(0, header.length - 1)
+      const tail = cols.slice(header.length - 1).join(' ')
+      cols = head.concat([tail])
+    }
+    rows.push(cols.map(s => String(s).replace(/\r?\n/g, ' ').trim()))
+  }
+  if(headers.length===0){ headers = header; setColOptions(headers) }
+  const hs = header
+  const nameIdx=hs.indexOf(colName.value||'')
+  const deptIdx=hs.indexOf(colDept.value||'')
+  const sIdx=hs.indexOf(colStart.value||'')
+  const eIdx=hs.indexOf(colEnd.value||'')
+  const stIdx=hs.indexOf(colStatus.value||'')
+  const arr=[]
+  rows.forEach(r=>{
+    const val = (i)=> i>=0 && i<r.length ? r[i] : ''
+    arr.push({
+      name: val(nameIdx),
+      dept: val(deptIdx),
+      start: val(sIdx),
+      end: val(eIdx),
+      status: val(stIdx)
+    })
+  })
+  return arr
+}
+function formatDate(s){
+  if(!s) return ''
+  const m=s.match(/(\d{4})[\/\-年]?(\d{1,2})[\/\-月]?(\d{1,2})/)
+  if(!m) return ''
+  const y=m[1],mm=('0'+m[2]).slice(-2),dd=('0'+m[3]).slice(-2)
+  return `${y}-${mm}-${dd}`
+}
+function normalize(){
+  dataset=dataset.map(x=>({name:x.name,dept:x.dept,start:formatDate(x.start),end:formatDate(x.end),status:x.status}))
+}
+function uniqueBy(arr,key){
+  const map=new Map();arr.forEach(x=>map.set(key(x),x));return [...map.values()]
+}
+function loadClipboard(){
+  return navigator.clipboard.readText()
+}
+function addTable(text,label){
+  const rows=parseTableText(text)
+  dataset=dataset.concat(rows)
+  normalize()
+  const li=document.createElement('li');li.textContent=`${label||'表'}：${rows.length} 行`;tablesUl.appendChild(li)
+}
+pasteBtn.addEventListener('click',async()=>{
+  try{
+    const t=await loadClipboard()
+    if(!t||!/\t/.test(t)){alert('剪贴板不是表格文本，请在智能表格内 Ctrl+A 然后 Ctrl+C');return}
+    addTable(t,'剪贴板')
+  }catch(e){alert('无法读取剪贴板，请改用“手动粘贴追加”')}
+})
+addAreaBtn.addEventListener('click',()=>{pastePanel.style.display='block'})
+appendAreaBtn.addEventListener('click',()=>{
+  const t=pasteArea.value.trim(); if(!t){alert('请粘贴内容');return}
+  addTable(t,'手动粘贴'); pasteArea.value=''
+})
+clearBtn.addEventListener('click',()=>{dataset=[];headers=[];tablesUl.innerHTML='';idleTBody.innerHTML=''})
+function isDone(s){return /(已完成|完成√|done|completed|complete|已结束|已关闭|finished|finish|√)/i.test(s||'')}
+function analyzeIdle(){
+  const today=new Date()
+  function cmp(d1,d2){return d1.getTime()-d2.getTime()}
+  function parse(d){if(!d) return null;const m=d.match(/(\d{4})-(\d{2})-(\d{2})/); if(!m) return null; return new Date(Number(m[1]),Number(m[2])-1,Number(m[3]))}
+  const byPerson=new Map()
+  dataset.forEach(r=>{
+    if(!r.name) return
+    const arr=byPerson.get(r.name)||[]
+    arr.push(r); byPerson.set(r.name,arr)
+  })
+  const result=[]
+  for(const [name,rows] of byPerson.entries()){
+    const dept=rows.find(x=>x.dept)?.dept||''
+    let hasOngoing=false
+    let allDone=rows.length>0
+    let latestEnd=null
+    rows.forEach(r=>{
+      const s=parse(r.start), e=parse(r.end)
+      if(!isDone(r.status)) allDone=false
+      if(s && e){
+        const inRange = cmp(s,today)<=0 && cmp(today,e)<=0
+        if(inRange && !isDone(r.status)) hasOngoing=true
+        if(!latestEnd || cmp(e,latestEnd)>0) latestEnd=e
+      }
+    })
+    const noTask=rows.length===0
+    const overdueNoNew = latestEnd && cmp(latestEnd,today)<0 && !hasOngoing
+    const idle = noTask || allDone || (!hasOngoing && overdueNoNew) || (!hasOngoing && rows.length>0 && !allDone && !latestEnd)
+    if(idle){
+      result.push({name,dept,skills:'',note: noTask?'无任务': allDone?'全部完成': overdueNoNew?'逾期且无新任务':'无进行中任务'})
+    }
+  }
+  return result.sort((a,b)=>a.dept.localeCompare(b.dept)||a.name.localeCompare(b.name))
+}
+analyzeBtn.addEventListener('click',()=>{
+  if(dataset.length===0){alert('请先追加至少一张表');return}
+  const list=analyzeIdle()
+  const names=[...new Set(list.map(r=>r.name))].sort((a,b)=>a.localeCompare(b,'zh-CN'))
+  idleTBody.innerHTML=''
+  names.forEach(n=>{
+    const tr=document.createElement('tr')
+    tr.innerHTML=`<td>${escape(n)}</td>`
+    idleTBody.appendChild(tr)
+  })
+})
+exportBtn.addEventListener('click',()=>{
+  const list=analyzeIdle()
+  const names=[...new Set(list.map(r=>r.name))].sort((a,b)=>a.localeCompare(b,'zh-CN'))
+  const lines=['研发人员'].concat(names.map(n=>csv(n)))
+  download('空闲研发人员.csv',lines.join('\n'),'text/csv;charset=utf-8')
+})
+function escape(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function csv(s){if(s==null) return ''; s=String(s); return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s}
+function download(name,content,type){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([content],{type}));a.download=name;a.click();URL.revokeObjectURL(a.href)}
+</script>
+</body>
+</html>
