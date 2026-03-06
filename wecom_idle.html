@@ -172,15 +172,29 @@ function parseTableText(t){
   const arr=[]
   rows.forEach(r=>{
     const val = (i)=> i>=0 && i<r.length ? r[i] : ''
+    const nm = val(nameIdx)
+    // 统一姓名：去除 @ 后缀与括号内容，收敛同一人不同写法
+    const normName = String(nm || '')
+      .replace(/@.*$/,'')
+      .replace(/[（(].*?[)）]/g,'')
+      .replace(/\s+/g,' ')
+      .trim()
     arr.push({
-      name: val(nameIdx),
+      name: normName,
       dept: val(deptIdx),
       start: val(sIdx),
       end: val(eIdx),
       status: val(stIdx)
     })
   })
-  return arr
+  // 前向填充姓名：智能表格常见“下行省略姓名”的情况
+  let lastName = ''
+  for (const r of arr) {
+    if (r.name) lastName = r.name
+    else r.name = lastName
+  }
+  // 过滤掉明显的分组行（既无状态又无日期）
+  return arr.filter(r => r.name && (r.status || r.start || r.end))
 }
 function formatDate(s){
   if(!s) return ''
@@ -231,23 +245,21 @@ function analyzeIdle(){
   const result=[]
   for(const [name,rows] of byPerson.entries()){
     const dept=rows.find(x=>x.dept)?.dept||''
+    const sched = rows.map(r=>({ s:parse(r.start), e:parse(r.end), status:r.status })).filter(x=>x.s&&x.e)
     let hasOngoing=false
-    let allDone=rows.length>0
+    let allDone=true
     let latestEnd=null
-    rows.forEach(r=>{
-      const s=parse(r.start), e=parse(r.end)
-      if(!isDone(r.status)) allDone=false
-      if(s && e){
-        const inRange = cmp(s,today)<=0 && cmp(today,e)<=0
-        if(inRange && !isDone(r.status)) hasOngoing=true
-        if(!latestEnd || cmp(e,latestEnd)>0) latestEnd=e
-      }
+    rows.forEach(r=>{ if(!isDone(r.status)) allDone=false })
+    sched.forEach(x=>{
+      const inRange = cmp(x.s,today)<=0 && cmp(today,x.e)<=0
+      if(inRange && !isDone(x.status)) hasOngoing=true
+      if(!latestEnd || cmp(x.e,latestEnd)>0) latestEnd=x.e
     })
-    const noTask=rows.length===0
     const overdueNoNew = latestEnd && cmp(latestEnd,today)<0 && !hasOngoing
-    const idle = noTask || allDone || (!hasOngoing && overdueNoNew) || (!hasOngoing && rows.length>0 && !allDone && !latestEnd)
+    const idle = sched.length===0 ? allDone : (!hasOngoing && (allDone || overdueNoNew))
     if(idle){
-      result.push({name,dept,skills:'',note: noTask?'无任务': allDone?'全部完成': overdueNoNew?'逾期且无新任务':'无进行中任务'})
+      const note = sched.length===0 ? (allDone?'全部完成':'无排期且无进行中') : (overdueNoNew?'逾期且无新任务':'无进行中任务')
+      result.push({name,dept,skills:'',note})
     }
   }
   return result.sort((a,b)=>a.dept.localeCompare(b.dept)||a.name.localeCompare(b.name))
